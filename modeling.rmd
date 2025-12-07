@@ -1,0 +1,224 @@
+---
+title: "modeling"
+author: "Kun Joo Cho"
+date: "2025-10-24"
+format: 
+output:
+  html_document:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc_float: true
+    number_sections: true
+    embed-resources: true
+execute:
+  include: true
+  eval: true    
+  warning: false
+  message: false
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, message = F, warning = F)
+
+library(tidyverse)
+library(caret) 
+library(gbm)
+library(pROC)
+library(dplyr)
+library(tidyr)
+```
+
+# Business Problem
+  Home Credit strives to broaden financial inclusion for the unbanked population by providing a positive and safe borrowing experience. However, it is challenging to predict applicant’s repayment abilities. It may create the risk of rejecting creditworthy applicants or approving loans to applicants who not able to repay.
+  
+# Analytic Problem
+	This project will be a supervised, binary classification. The model will be built with various data including application, Credit Bureau, and historical transaction data as predictors. The target variable will be the ‘target’, 1 - client with payment difficulties: he/she had late payment more than X days on at least one of the first Y installments of the loan in our sample, 0 - all other cases. 
+	
+# EDA Summary
+  The data is unbalanced, only 8% of the clients had failed with the payment. 
+  The data has lots of missing data. It might be bias if I drop all the missing data. 
+
+```{r application train data frame}
+app_train_df <- read_csv("application_train.csv")
+summary(app_train_df)
+head(app_train_df)
+```
+```{r application test data frame}
+app_test_df <- read_csv("application_test.csv")
+summary(app_test_df)
+head(app_test_df)
+```
+```{r All client previous credits provided by other financial institutions}
+bureau_df <- read_csv("bureau.csv")
+summary(bureau_df)
+head(bureau_df)
+```
+
+# Preprocessing and Feature Engineering
+```{r preprocessing}
+bureau_agg <- bureau_df %>%
+  group_by(SK_ID_CURR) %>%
+  summarise(
+    previous_loans_count = n(),
+    active_loans_count = sum(CREDIT_ACTIVE == "Active", na.rm = TRUE)
+  )
+
+model_data <- app_train_df %>%
+  left_join(bureau_agg, by = "SK_ID_CURR")
+
+model_data <- model_data %>%
+  mutate(DAYS_EMPLOYED = if_else(DAYS_EMPLOYED > 0, NA_integer_, DAYS_EMPLOYED))
+
+model_data <- model_data %>%
+  mutate(TARGET = factor(TARGET, levels = c(1, 0), labels = c("Default", "Repaid")))
+
+model_data <- model_data %>%
+  mutate(
+    credit_goods_ratio = AMT_CREDIT / AMT_GOODS_PRICE,
+    credit_income_ratio = AMT_CREDIT / AMT_INCOME_TOTAL,
+    employed_age_ratio = DAYS_EMPLOYED / DAYS_BIRTH
+  )
+
+model_data <- model_data %>%
+  select(
+    TARGET, EXT_SOURCE_1, EXT_SOURCE_2, EXT_SOURCE_3, DAYS_BIRTH, DAYS_EMPLOYED, AMT_CREDIT, AMT_ANNUITY, AMT_GOODS_PRICE, AMT_INCOME_TOTAL, NAME_EDUCATION_TYPE, previous_loans_count, active_loans_count, credit_goods_ratio, credit_income_ratio, employed_age_ratio)
+
+model_data <- model_data %>%
+  mutate(
+    NAME_EDUCATION_TYPE = if_else(
+      is.na(NAME_EDUCATION_TYPE),
+      names(which.max(table(NAME_EDUCATION_TYPE))),
+      NAME_EDUCATION_TYPE
+    ),
+    across(where(is.numeric), ~ if_else(is.na(.x), median(.x, na.rm = TRUE), .x))
+  )
+```
+
+# Training and a Validation Set
+```{r }
+set.seed(123) 
+
+trainIndex <- createDataPartition(model_data$TARGET, 
+                                  p = .8,
+                                  list = FALSE, 
+                                  times = 1)
+
+train_set <- model_data[ trainIndex,]
+
+val_set <- model_data[-trainIndex,]
+```
+
+# benchmark
+```{r }
+benchmark_accuracy <- sum(train_set$TARGET == 0) / nrow(train_set)
+benchmark_accuracy
+```
+
+# Cross-Validation
+```{r }
+ctrl <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary, 
+  savePredictions = "final"     
+)
+```
+
+# Logistic Regression
+```{r }
+# sum(is.na(train_set$TARGET))
+# sapply(train_set, function(x) sum(is.na(x)))
+
+set.seed(123)
+glm <- train(
+  TARGET ~ .,
+  data = train_set,
+  method = "glm", 
+  family = "binomial",  
+  trControl = ctrl,
+  metric = "ROC",
+  preProcess = c("center", "scale")
+)
+
+glm
+```
+
+# Random Forest
+```{r }
+rd <- expand.grid(mtry = c(3, 5, 7),
+                  splitrule = "gini", 
+                  min.node.size = 1
+                  )
+
+
+set.seed(123)
+rfm <- train(
+  TARGET ~ .,
+  data = train_set,
+  method = "ranger",
+  trControl = ctrl,
+  metric = "ROC",
+  tuneGrid = rd
+)
+
+rfm
+```
+
+# Gradient Boosting Machine
+```{r }
+#gb <- expand.grid(n.trees = c(100, 150), 
+#                        interaction.depth = c(3), 
+#                        shrinkage = c(0.1), 
+#                        n.minobsinnode = c(10))
+
+#set.seed(123)
+#gbm <- train(
+#  TARGET ~ .,
+#  data = train_set,
+#  method = "gbm",
+#  trControl = ctrl,
+#  metric = "ROC",
+#  preProcess = c("knnImpute"),
+#  tuneGrid = gb,
+#)
+
+#gbm
+```
+
+
+```{r }
+
+```
+
+
+```{r }
+
+```
+
+```{r }
+
+```
+
+```{r }
+
+```
+
+```{r }
+
+```
+
+```{r }
+
+```
+
+```{r }
+
+```
+
+```{r }
+
+```

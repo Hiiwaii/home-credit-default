@@ -1,0 +1,339 @@
+---
+title: "Group Model"
+author: "April Greenwood, Brian Frerichs, Kun joo choo"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3   
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(caret)
+library(pROC)
+library(janitor)
+library(readr)
+library(dplyr)
+library(caret)
+library(e1071)
+
+application_train <- read_csv("C:/Users/green/Downloads/application_train.csv/application_train.csv")
+
+
+## trim data set to only include most important predictors
+
+application_train_slim <- application_train %>%
+  select(TARGET, CNT_CHILDREN, AMT_INCOME_TOTAL,AMT_CREDIT,AMT_ANNUITY,NAME_INCOME_TYPE,DAYS_BIRTH,DAYS_EMPLOYED,OCCUPATION_TYPE,CNT_FAM_MEMBERS,EXT_SOURCE_1,EXT_SOURCE_2,EXT_SOURCE_3)
+
+
+## I chose to create a new column called employment duration that bins the DAYS_EMPLOYED column and handles the special 365243 value
+
+APP_TRAIN_BIN_EMPLOYMENT <- application_train_slim %>%
+  mutate(
+    EMPLOYMENT_DURATION = case_when(
+      DAYS_EMPLOYED == 365243 ~ "Not Working",
+      DAYS_EMPLOYED > -365 ~ "Short Term",
+      DAYS_EMPLOYED <= -365 & DAYS_EMPLOYED >= -1825 ~ "Medium Term",
+      TRUE ~ "Long Term" # Default case if no other conditions are met
+    )
+  )
+
+## Drop the rows where AMT_ANNUITY is blank because there are only a few
+
+DROP_BLANKS <- APP_TRAIN_BIN_EMPLOYMENT %>%
+  filter(!is.na(AMT_ANNUITY))
+
+
+## Drop the rows where CNT_FAM_MEMBERS is blank because there are only a few
+
+DROP_BLANKS <- DROP_BLANKS %>%
+  filter(!is.na(CNT_FAM_MEMBERS))
+  
+
+
+## Replace NA's in OCCUPATION_TYPE with an "Unavailable"
+
+FIX_EMPLOYMENT <- DROP_BLANKS %>%
+  mutate(
+    OCCUPATION_TYPE = case_when(
+      is.na(OCCUPATION_TYPE) ~ "Unavailable",
+      TRUE ~ OCCUPATION_TYPE
+    )
+  )
+
+
+## Do median imputation for the missing risk score values
+
+risk_scores <- FIX_EMPLOYMENT[, c("EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3")]
+
+
+for (col in names(risk_scores)) {
+  # Convert to numeric if not already
+  risk_scores[[col]] <- as.numeric(risk_scores[[col]])
+  
+  # Replace NA with median
+  if (is.numeric(risk_scores[[col]])) {
+    median_value <- median(risk_scores[[col]], na.rm = TRUE)
+    risk_scores[[col]][is.na(risk_scores[[col]])] <- median_value
+  }
+}
+
+FIX_EMPLOYMENT[, c("EXT_SOURCE_1", "EXT_SOURCE_2", "EXT_SOURCE_3")] <- risk_scores
+
+CLEAN_TRAIN <- clean_names(FIX_EMPLOYMENT)
+print(CLEAN_TRAIN)
+
+```
+
+## Partition
+
+```{r}
+## look at proportions of the target variable
+
+CLEAN_TRAIN |>
+     count(target) |>
+     mutate(perc = n/sum(n)) 
+
+## convert employment duration to a factor
+CLEAN_TRAIN$employment_duration <- factor(CLEAN_TRAIN$employment_duration)
+
+CLEAN_TRAIN$target <- factor(CLEAN_TRAIN$target, 
+                               levels = c(0, 1), 
+                               labels = c("Repaid", "Default"))
+
+## set seed for reproducibility
+
+set.seed(12345)
+
+## split training data into a train set and a model validation set
+
+index_numbers_split <- createDataPartition(CLEAN_TRAIN$target,p=.7,list = FALSE)
+
+model_tr <- CLEAN_TRAIN[index_numbers_split,]
+model_val <- CLEAN_TRAIN[-index_numbers_split,]
+
+```
+
+# LINEAR REGRESSION
+
+We used two different methods in our individual work to downsample. One was a random generated down sampled model that was applied and another method was the caret packaged used on each model. Results and cross validation was simliar for both, aroun .7.
+
+```{r}
+
+#Down Sampled data
+set.seed(123)
+model_tr_down <- downSample(x = model_tr %>% select(-target),
+                            y = as.factor(model_tr$target),
+                            yname = "target")
+
+table(model_tr_down$target)
+prop.table(table(model_tr_down$target))
+
+# Not Downsampled linear regression 
+logistic_model <- glm(target ~ ., 
+                      data = model_tr, 
+                      family = binomial(link = "logit"))
+
+logistic_pred_prob <- predict(logistic_model, 
+                               newdata = model_val, 
+                               type = "response")
+
+logistic_pred_class <- ifelse(logistic_pred_prob > 0.5, 1, 0)
+
+#caret down sampled
+
+caret_glm <- train(
+  target ~ amt_income_total +
+           amt_annuity +
+           amt_credit +
+           ext_source_1 +
+           ext_source_2 +
+           ext_source_3 +
+           days_birth +
+           employment_duration,
+  method = "glm",
+  family = "binomial",
+  trControl = trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    sampling = "down"
+  ),
+  data = model_tr,
+  metric = "ROC"
+)
+
+summary(caret_glm)
+
+
+
+# AUC
+roc_obj <- roc(model_val$target, logistic_pred_prob)
+print(roc_obj)
+
+auc_value <- auc(roc_obj)
+
+auc_value_caret_cv <- caret_glm$results$ROC
+print(paste("Average Cross-Validation ROC (AUC) for Caret GLM:", round(auc_value_caret_cv, 4)))
+
+plot(roc_obj, col = "blue", lwd = 2)
+
+```
+
+## Regression commentary and AUC Commentary
+We tested two logistic regression models: a standard glm on the original imbalanced data (AUC: 0.7306) and a caret model using 5-fold CV with downsampling (AUC: 0.7231). 
+Both methods produced nearly the same results, showing that downsampling did not significantly impact performance for this model. 
+This AUC of ~0.73 indicates a moderate predictive ability.
+
+
+# Random Forest 
+```{r}
+set.seed(123)
+library(caret)
+library(randomForest)
+
+rf_model <- randomForest(
+  target ~ ., 
+  data = model_tr_down,
+  ntree = 200,                            
+  mtry = sqrt(ncol(model_tr_down) - 1),   
+  importance = TRUE
+)
+
+# Predictions
+rf_pred_class <- predict(rf_model, newdata = model_val, type = "class")
+rf_pred_prob  <- predict(rf_model, newdata = model_val, type = "prob")[, 2]
+
+rf_roc <- roc(model_val$target, rf_pred_prob)
+
+
+set.seed(123)
+
+cv_control <- trainControl(
+  method = "cv",       
+  number = 5,           
+  classProbs = TRUE,    
+  summaryFunction = twoClassSummary  
+)
+
+rf_cv <- train(
+  target ~ .,
+  data = model_tr_down,
+  method = "rf",
+  metric = "ROC",             
+  trControl = cv_control,
+  tuneGrid = data.frame(mtry = floor(sqrt(ncol(model_tr_down) - 1))),
+  ntree = 200
+)
+
+
+# View results
+print(rf_cv)
+auc_value <- auc(rf_roc)
+print(paste("AUC:", round(auc_value, 4)))
+
+plot(rf_roc, col = "blue", lwd = 2, main = "Random Forest ROC Curve")
+abline(a = 0, b = 1, lty = 2, col = "gray")
+
+```
+### Random Forest commentary 
+This model uses the downsampled model: model_tr_down. The AUC is .7261 which is almost the exact number that the regression gave us. 200 trees was deemed enough to stabalize the model. It is cross validated with 5 folds to ensure that the results among test the generalization of the model. The results of this were an auc of .715. This is slightly lower, but it is in the range which suggests the results weren't by chance. 
+
+
+# Gradient Boost
+
+```{r}
+library(gbm)
+library(pROC)
+library(caret)
+
+# Gradient Boosting Machine
+caret_xgb <- train(
+  target ~ .,
+  method = "gbm",
+  trControl = trainControl(
+    method = "cv",
+    number = 5,
+    classProbs = TRUE,
+    summaryFunction = twoClassSummary,
+    sampling = "down"
+  ),
+  data = model_tr,
+  metric = "ROC",
+  tuneLength = 5
+)
+
+summary(caret_xgb)
+
+# Identify the positive class (usually the second level)
+positive_class <- levels(model_tr$target)[2]
+
+# ROC for training set
+train_probs <- predict(caret_xgb, newdata = model_tr, type = "prob")[, positive_class]
+roc_train <- roc(response = model_tr$target, predictor = train_probs)
+cat("Train AUC:", auc(roc_train), "\n")
+
+# ROC for test set
+test_probs <- predict(caret_xgb, newdata = model_val, type = "prob")[, positive_class]
+roc_test <- roc(response = model_val$target, predictor = test_probs)
+cat("Test AUC:", auc(roc_test), "\n")
+
+# Optional: Plot both ROC curves
+plot(roc_train, col = "blue", main = "ROC Curves")
+lines(roc_test, col = "red")
+legend("bottomright", legend = c("Train", "Test"), col = c("blue", "red"), lwd = 2)
+
+
+# Extract variable importance
+importance <- varImp(caret_xgb, scale = TRUE)
+
+# Convert to data frame for ggplot
+importance_df <- data.frame(
+Feature = rownames(importance$importance),
+Importance = importance$importance$Overall
+)
+
+# Plot of the most important predictors
+ggplot(importance_df, aes(x = reorder(Feature, Importance), y = Importance)) +
+geom_col(fill = "steelblue") +
+coord_flip() +
+labs(title = "Feature Importance (GBM Model)",
+x = "Features",
+y = "Importance Score") +
+theme_minimal()
+
+```
+
+
+## Gradient Boost Commentary 
+
+This model achieved an AUC of roughly .75 on both the training and the validation set. Down sampling and K fold validation was performed.
+The feature importance plot indicated that the 3 external risk score variables were highly important, as were the annuity, income, and credit variables. Age, and employment duration also appear to matter.
+
+
+
+# SUMMARIZED RESULTS AND COMPARISONS, NEXT STEPS
+
+The purpose of this modeling is to answer the business question: 
+"What people should be extedned home loans?"
+
+The metric for this model is the area under the curve. The ROC curve is the function between true positive rates on a y axis and false positives on the x axis. The area under the curve represents the models ability to seperate the true and false positives 1 being perfect seperation and 0 being completely wrong.
+
+We have examined 3 different models. A classic linear regression, a random forrest, and gradient boost. Part of this process included a C50 decision tree, but it was deemed to be ineffective as it was returning an auc of .5. This .5 means that the model was not finding insightful infomration. This could potentially be from the treatment of NA values in the EXT_SOURCE, which a median was entered into missing values. 
+
+The following are the AUC of the different models:
+linear regression: standard glm (AUC: 0.7306) caret with 5-fold CV & downsampled (AUC: 0.7231). 
+Radom forrest:.7261 cross validation 5 fold : .715
+Gradient boost: .75 on both the training and the validation set
+
+The standard linear regression may have the highest AUC, but it is also the simplest model. It is likely misclassifying cases and producing some unreliable probabilities. Positives are ranked higher than negatives, depending on the business objective, the higher AUC doesn't mean it is a better modle. 
+
+For next steps, we need to understand better how our models can be applied into actionable business insights. We know that an AUC in the 70's has significant predictive power.
+However, AUC does not exist in a vacuum. We need to choose a threshold along our chosen AUC curve that gives the business a framework for predicting default. To choose this threshold, we need a better understanding
+of the company's risk profile, and how much they typically lose to default. For example, if the agency wants to be more risk averse and minimize their default rate, they would choose a lower cutoff along the AUC

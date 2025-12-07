@@ -1,0 +1,303 @@
+---
+title: "Home Credit EDA"
+author: "Kun Joo Cho"
+date: "2025-09-28"
+format: 
+output:
+  html_document:
+    toc: true
+    toc-depth: 3
+    toc-location: left
+    toc_float: true
+    number_sections: true
+    embed-resources: true
+execute:
+  include: true
+  eval: true    
+  warning: false
+  message: false
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, message = F, warning = F)
+
+library(tidyverse)
+library(knitr)
+library(caret) 
+library(skimr)
+library(ggplot2)
+library(janitor)
+```
+
+```{r application train data frame}
+app_train_df <- read_csv("application_train.csv")
+summary(app_train_df)
+head(app_train_df)
+```
+```{r application test data frame}
+app_test_df <- read_csv("application_test.csv")
+summary(app_test_df)
+head(app_test_df)
+```
+```{r All client previous credits provided by other financial institutions}
+bureau_df <- read_csv("bureau.csv")
+summary(bureau_df)
+head(bureau_df)
+```
+```{r previous application data frame}
+pre_app_df <- read_csv("previous_application.csv")
+summary(pre_app_df)
+head(pre_app_df)
+```
+# Dataset Description
+## application_{train|test}.csv
+  This is the main table, broken into two files for Train (with TARGET) and Test (without TARGET).
+  Static data for all applications. One row represents one loan in our data sample.
+
+## bureau.csv
+  All client's previous credits provided by other financial institutions that were reported to Credit Bureau (for clients who have a loan in our sample).
+  For every loan in our sample, there are as many rows as number of credits the client had in Credit Bureau before the application date.
+
+## bureau_balance.csv
+  Monthly balances of previous credits in Credit Bureau.
+  This table has one row for each month of history of every previous credit reported to Credit Bureau – i.e the table has (#loans in sample * # of relative previous credits * # of months where we have some history observable for the previous credits) rows.
+
+## POS_CASH_balance.csv
+  Monthly balance snapshots of previous POS (point of sales) and cash loans that the applicant had with Home Credit.
+  This table has one row for each month of history of every previous credit in Home Credit (consumer credit and cash loans) related to loans in our sample – i.e. the table has (#loans in sample * # of relative previous credits * # of months in which we have some history observable for the previous credits) rows.
+
+## credit_card_balance.csv
+  Monthly balance snapshots of previous credit cards that the applicant has with Home Credit.
+  This table has one row for each month of history of every previous credit in Home Credit (consumer credit and cash loans) related to loans in our sample – i.e. the table has (#loans in sample * # of relative previous credit cards * # of months where we have some history observable for the previous credit card) rows.
+
+## previous_application.csv
+  All previous applications for Home Credit loans of clients who have loans in our sample.
+  There is one row for each previous application related to loans in our data sample.
+
+## installments_payments.csv
+  Repayment history for the previously disbursed credits in Home Credit related to the loans in our  sample.
+  There is a) one row for every payment that was made plus b) one row each for missed payment.
+  One row is equivalent to one payment of one installment OR one installment corresponding to one payment of one previous Home Credit credit related to loans in our sample.
+
+## HomeCredit_columns_description.csv
+  This file contains descriptions for the columns in the various data files.
+
+
+# Business Problem
+  Home Credit strives to broaden financial inclusion for the unbanked population by providing a positive and safe borrowing experience. However, it is challenging to predict applicant’s repayment abilities. It may create the risk of rejecting creditworthy applicants or approving loans to applicants who not able to repay.
+
+
+# Analytic Problem
+	This project will be a supervised, binary classification. The model will be built with various data including application, Credit Bureau, and historical transaction data as predictors. The target variable will be the ‘target’, 1 - client with payment difficulties: he/she had late payment more than X days on at least one of the first Y installments of the loan in our sample, 0 - all other cases. 
+
+
+# AI Usage Log
+## My prompt
+  You are a credit risk analyst. Identify the top 15-20 variables and tell me what would be most predictive of TARGET, based only on the meaning of the variables?
+## AI respond
+  Of course. As a credit risk analyst, I can identify the variables that are most likely to predict whether a client will have payment difficulties. Based on the descriptions in the HomeCredit_columns_description.csv file and general credit risk assessment principles, here are the top 15-20 variables I would focus on, categorized for clarity.
+
+### Financial Strength and Stability
+These variables directly relate to the applicant's financial health and their ability to handle debt. They are the most direct indicators of repayment capability.
+
+AMT_INCOME_TOTAL: Total income of the client. This is a fundamental variable. A higher income generally suggests a greater capacity to repay a loan.
+
+AMT_CREDIT: Credit amount of the loan. The size of the loan is a crucial factor. A larger loan amount, especially in relation to income, can increase the risk.
+
+AMT_ANNUITY: Loan annuity. This is the regular payment amount. The ratio of the annuity to the client's income is a powerful predictor of financial strain.
+
+AMT_GOODS_PRICE: Price of the goods for which the loan is given. For consumer loans, this provides context for the loan amount and can be an indicator of the client's financial aspirations and stability.
+
+NAME_INCOME_TYPE: Client's income type (e.g., businessman, working, maternity leave). The stability of income is as important as the amount. Salaried employees are often considered lower risk than those with irregular income streams.
+
+EXT_SOURCE_1, EXT_SOURCE_2, EXT_SOURCE_3: Normalized score from external data source. These are often the most predictive variables in credit scoring models. They are aggregated scores from other financial institutions or credit bureaus and provide a comprehensive view of a client's creditworthiness.
+
+### Demographics and Life Stage
+Demographic data can be a proxy for stability and financial responsibility.
+
+DAYS_BIRTH: Client's age in days at the time of application (negative values). Age can be an indicator of financial stability and experience in managing credit. Middle-aged applicants are often considered the most stable.
+
+DAYS_EMPLOYED: How many days before the application the person started their current job (negative values). Longer employment duration suggests stability and a reliable source of income. Very recent employment could be a red flag.
+
+NAME_EDUCATION_TYPE: Level of highest education the client achieved. Higher education levels can correlate with higher and more stable incomes.
+
+NAME_FAMILY_STATUS: Family status of the client. This can indicate financial dependents and differing levels of financial responsibility.
+
+CNT_CHILDREN: Number of children the client has. The number of dependents directly impacts a client's disposable income.
+
+### Past Payment Behavior
+How a client has handled past financial obligations is one of the strongest predictors of future behavior.
+
+DAYS_INSTALMENT vs. DAYS_ENTRY_PAYMENT (from installments_payments.csv): The difference between when an installment was due and when it was paid is a direct measure of past payment behavior. Consistently late payments are a major warning sign.
+
+AMT_INSTALMENT vs. AMT_PAYMENT (from installments_payments.csv): The difference between the prescribed installment amount and the amount actually paid. Any shortfall is a clear indicator of financial difficulty.
+
+### Loan Characteristics and Indebtedness
+These variables describe the nature of the current loan and the client's overall debt situation.
+
+NAME_CONTRACT_TYPE: Identification if the loan is cash or revolving. The type of loan can attract different types of borrowers and has different risk profiles.
+
+FLAG_OWN_CAR / FLAG_OWN_REALTY: Flag if the client owns a car/house or flat. Asset ownership can be a sign of wealth and stability, but can also indicate existing financial commitments.
+
+By analyzing these variables, we can build a comprehensive picture of an applicant's credit risk profile and make a well-informed prediction about their likelihood of meeting their repayment obligations.
+## brief critique
+  It catches variables seems predictive of TARGET. It categorized well so easy to understand. However, I think because it was only based on the description, it overestimated some variables. I think some of the variables like Demographics and Life Stage or Loan Characteristics and Indebtedness may be less predictive of TARGET.
+  
+  
+# Questions to guide your exploration.
+1. How balanced the data?
+2. what is the top 15 correlated varibales with target?
+3. Any NA in data and what about the quality of the data?
+4. Any relationship between target and financial status such as income, credit, loan annuity, or ownership of car/house?
+5. What about the other status like education levels, family statuses, or occupation types?
+6. Does age really a thing for the repayment ability?
+7. Any significant relationships with variables from other files like installments_payments.csv, previous_application.csv, or credit_card_balance.csv?
+  
+  
+## 1. How balanced the data?
+Analyze the data to find out how balanced.
+```{r Analyze the relationships}
+# compare the distribution of target
+app_train_df %>%
+  count(TARGET) %>%
+  mutate(prop = n / sum(n)) %>%
+  arrange(desc(prop)) %>%
+  kable()
+
+# visualize the distribution of target
+ggplot(app_train_df, aes(x = factor(TARGET))) +
+  geom_bar(aes(y = (..count..)/sum(..count..))) +
+  scale_y_continuous(labels = scales::percent)
+```
+According to the result, application training file is unbalanced. Only 8% of the clients had difficulties with payment. Main challenge of the case will be how to predict minor cases effectively. 
+
+## 2. Crrelations
+Calculate the correlations between targer and other varialbles and take top 15 variables. 
+```{r correlations}
+correlations <- app_train_df %>%
+  select_if(is.numeric) %>%
+  cor(use = "pairwise.complete.obs") %>% # calculate cells with data only.
+  as.data.frame() %>%
+  select(TARGET) %>%
+  arrange(desc(abs(TARGET)))
+
+head(correlations, 15)
+```
+
+## 3. NA and Quality of the data
+```{r NA}
+na <- app_train_df %>%
+  map_dfr(~sum(is.na(.))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "na_count") %>%
+  filter(na_count > 0) %>%
+  mutate(na_proportion = na_count / nrow(app_train_df)) %>%
+  arrange(desc(na_proportion))
+
+head(na, 15)
+```
+
+```{r Quality}
+skim(app_train_df)
+```
+  There are lots of variables missing values. Need to decide to remove those variables or find out the way to apply to the analyst. Some variables have outlier. The quality of the data is raw. I think I need to do preprocessing to get a better results. 
+
+## 4. relationship between target and financial status
+```{r relationship with financial status}
+income_target <- ggplot(app_train_df, aes(x = log10(AMT_INCOME_TOTAL), fill = factor(TARGET))) +
+  geom_density(alpha = 0.6)
+income_target
+
+credit_target <- ggplot(app_train_df, aes(x = factor(TARGET), y = AMT_CREDIT, fill = factor(TARGET))) +
+  geom_boxplot(show.legend = FALSE) 
+credit_target
+
+realty_target <- ggplot(app_train_df, aes(x = FLAG_OWN_REALTY, fill = factor(TARGET))) +
+  geom_bar(position = "fill")
+realty_target
+
+car_target <- ggplot(app_train_df, aes(x = FLAG_OWN_CAR, fill = factor(TARGET))) +
+  geom_bar(position = "fill")
+car_target
+```
+The results of these graphics show that financial variables might not the right variables to find out the repayment ablility. 
+
+## 5. relationship between target and other status
+education levels, family statuses, or occupation types
+```{r other status}
+edu_target <- app_train_df %>%
+  ggplot(aes(x = fct_reorder(NAME_EDUCATION_TYPE, TARGET, .fun = mean, .desc = TRUE), fill = factor(TARGET))) +
+  geom_bar(position = "fill") + coord_flip()
+
+edu_target
+
+fam_target <- app_train_df %>%
+  ggplot(aes(x = fct_reorder(NAME_FAMILY_STATUS, TARGET, .fun = mean, .desc = TRUE), fill = factor(TARGET))) +
+  geom_bar(position = "fill") + coord_flip()
+
+fam_target
+
+occu_target <- app_train_df %>%
+  ggplot(aes(x = fct_reorder(OCCUPATION_TYPE, TARGET, .fun = mean, .desc = TRUE), fill = factor(TARGET))) +
+  geom_bar(position = "fill") + coord_flip()
+
+occu_target
+```
+education levels, family statuses, and occupation types show some relationship with target. lower education levels, civil marriage, low-skilled laborers seems didn't repay. 
+
+## 6. relationship between target and age
+```{r age}
+app_train_df %>%
+  mutate(AGE = -DAYS_BIRTH / 365) %>%
+  ggplot(aes(x = AGE, fill = factor(TARGET))) +
+  geom_density(alpha = 0.6)
+
+```
+Age seems have relationship. younger people may not repay.
+
+## 7. Relationships with variables from other files
+
+```{r }
+# relationship with refused previously
+prev_app_agg <- pre_app_df %>%
+  group_by(SK_ID_CURR) %>%
+  summarise(
+    prev_app_count = n(),
+    refused_proportion = mean(NAME_CONTRACT_STATUS == "Refused", na.rm = TRUE)
+  )
+
+app_train_merged1 <- app_train_df %>%
+  left_join(prev_app_agg, by = "SK_ID_CURR")
+
+refuger_target <- ggplot(app_train_merged1, aes(x = factor(TARGET), y = refused_proportion, fill = factor(TARGET))) +
+  geom_boxplot(show.legend = FALSE)
+
+refuger_target
+
+# relationship with credit with other companies
+bureau_agg <- bureau_df %>%
+  group_by(SK_ID_CURR) %>%
+  summarise(
+    active_bureau_loans = sum(CREDIT_ACTIVE == "Active", na.rm = TRUE)
+  )
+
+app_train_merged2 <- app_train_df %>%
+  left_join(bureau_agg, by = "SK_ID_CURR")
+
+other_credit_target <- ggplot(app_train_merged2, aes(x = factor(TARGET), y = active_bureau_loans, fill = factor(TARGET))) +
+  geom_boxplot(show.legend = FALSE)
+
+other_credit_target
+
+```
+previously refuged people seems no repay. 
+
+
+# Summary of EDA
+This data is unbalanced so need to preprocessing. demographic factors had relationships with target. previous refuged or other company debt seems related too. 
+
+
+
+
+
